@@ -8,9 +8,23 @@ fi
 # use envs as local params for convenience
 # e.g.
 # NNODE=1 NGPU=8 LOG_RANK=0 ./train.sh
+# Node = machines, Rank = processes ~= GPU, word_size = machines * processes
+: '
+Usage:
+
+ local rank and ranks
+
+ Node 0:
+   rank 0–7   (LOCAL_RANK 0–7)
+ Node 1:
+   rank 8–15  (LOCAL_RANK 0–7)
+
+'
+# export CUDA_VISIBLE_DEVICES=2,3,4,5,6,7
 NNODE=${NNODE:-"1"}
-NGPU=${NGPU:-"8"}
+NGPU=${NGPU:-"4"}
 LOG_RANK=${LOG_RANK:-0}
+
 
 if [[ -z "${MASTER_ADDR}" ]]; then
   export MASTER_ADDR="localhost"
@@ -86,6 +100,7 @@ fi
 RUN_NAME="$model-$(basename $path)"
 RUN_ID="$RUN_NAME-$date"
 
+#Env variables which help continue from where stops
 export WANDB_RESUME=allow
 if [[ -z "${WANDB_PROJECT}" ]]; then
   export WANDB_PROJECT="fla"
@@ -97,6 +112,7 @@ if [[ -z "${WANDB_RUN_ID}" ]]; then
   export WANDB_RUN_ID="$RUN_ID"
 fi
 
+# CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 \
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 torchrun --nnodes=${NNODE} \
   --nproc_per_node=${NGPU} \
@@ -108,6 +124,13 @@ torchrun --nnodes=${NNODE} \
   --log-dir $path/logs \
   -m flame.train \
   $params
+
+# --local-ranks-filter 0 
+# 在多机 2 节点、每节点 8 卡时：
+# Node 0: LOCAL_RANK 0..7 → RANK 0..7
+# Node 1: LOCAL_RANK 0..7 → RANK 8..15
+# Node 0 → rank 0 打日志
+# Node 1 → rank 8 打日志
 
 echo "TRAINING DONE!"
 echo "Converting the DCP checkpoints to HF format..."
