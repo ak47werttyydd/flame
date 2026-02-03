@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from contextlib import nullcontext
+import inspect
 import json
 import os
 import time
@@ -14,6 +16,7 @@ import torch
 from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
 from fla.ops.utils import prepare_position_ids
 from torch.distributed.elastic.multiprocessing.errors import record
+import torch.distributed as dist
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.ft import FTParallelDims, init_ft_manager
 from torchtitan.components.loss import build_cross_entropy_loss
@@ -37,6 +40,12 @@ from flame.models.parallelize_fla import parallelize_fla
 from flame.models.pipeline_fla import pipeline_fla
 from flame.tools.utils import get_nparams_and_flops
 
+
+# transfer DTensor to tensor if FSDP is enabled, otherwise keep tensor as tensor
+def get_local_tensor(tensor):
+    if hasattr(tensor, 'to_local'):
+        return tensor.to_local()
+    return tensor
 
 def build_tokenizer(job_config: JobConfig) -> AutoTokenizer:
     return AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
@@ -183,6 +192,9 @@ def main(job_config: JobConfig):
 
     logger.info(f"Loading model config from {job_config.model.config}")
     model_config = AutoConfig.from_pretrained(job_config.model.config)
+    logger.info(
+        f"Config class: {type(model_config)} | file: {inspect.getfile(type(model_config))}"
+    )
     # set the model configs from training inputs:
     # 1. norm type to decide which norm layer to use
     # 2. disable fused norm if TP is enabled
@@ -212,6 +224,9 @@ def main(job_config: JobConfig):
     )
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(model_config)
+        logger.info(
+            f"Model class: {type(model)} | file: {inspect.getfile(type(model))}"
+        )
         if (
             getattr(model_config, "fuse_linear_cross_entropy", False)
             and FusedLinearCrossEntropyLoss is not None
@@ -488,23 +503,105 @@ def main(job_config: JobConfig):
                     )
                 else:
                     # Non-PP forward / backward
-                    with train_context(optional_context_parallel_ctx):
-                        with maybe_enable_amp:
-                            output = model(
-                                input_ids=input_ids,
-                                labels=labels,
-                                position_ids=position_ids,
-                                cu_seqlens=cu_seqlens,
-                        )
-                        loss = (
-                            output.loss
-                            / job_config.training.gradient_accumulation_steps
-                        )
-                        loss.backward()
+                    # disable grad all-reduce on DDP 
+                    no_sync_ctx = model.no_sync() if hasattr(model,'no_sync') else nullcontext()
+                    with no_sync_ctx:
+                        with train_context(optional_context_parallel_ctx):
+                            with maybe_enable_amp:
+                                output = model(
+                                    input_ids=input_ids,
+                                    labels=labels,
+                                    position_ids=position_ids,
+                                    cu_seqlens=cu_seqlens,
+                            )
+                            loss = (
+                                output.loss
+                                / job_config.training.gradient_accumulation_steps
+                            )
+                            loss.backward()
 
                 losses.append(loss)
             loss = sum(losses)
 
+            # ===start===== record gradient norm at local rank before manually all-reduce ==========
+            # collect parameters
+            all_params = [p for m in model_parts for p in m.parameters()]
+            grads_with_grad = [p.grad for p in all_params if p.grad is not None]
+
+            # square of L2 norm
+            if len(grads_with_grad) > 0:
+                device = grads_with_grad[0].device
+                norm_type = 2.0
+                # search by for each （not go through this branch）
+                # if hasattr(torch._C, "_nn") and hasattr(torch._C._nn, "utils"):
+                #     # g.norm(2.0) is the norm of a parameter (a tensor with entries)
+                #     # g.norm(norm_type) ** norm_type is the sum of (each entry)^2 
+                #     local_grad_norms_sq = [
+                #         g.norm(norm_type) ** norm_type for g in grads_with_grad
+                #     ]
+                #     local_grad_norm_sq = sum(local_grad_norms_sq)
+                #     # local_grad_norm = local_total_norm_sq ** (1.0 / norm_type)
+                # else:
+                #     # fall back to compute by torch (enter here!)
+                #     local_grad_norm_sq = torch.norm(
+                #         torch.stack([g.detach().to_local().norm(2.0) for g in grads_with_grad]),
+                #         p=2.0,
+                #     ) ** norm_type 
+                local_grad_norm_sq = sum(
+                    get_local_tensor(g.detach()).norm(norm_type).item() ** norm_type
+                    for g in grads_with_grad
+                )
+
+            else: #empty square of the local norm
+                local_grad_norm_sq = torch.tensor(0.0, device=device)
+
+            # get current rank ID
+            rank = int(os.environ.get("RANK", 0))
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+            logger.info(
+                f"[Rank {rank} / Local Rank {local_rank}] "
+                f"Local squared gradient norm (before all-reduce): {local_grad_norm_sq:.6f}"
+            )
+
+            # save
+            gnorm_log_file = f"{job_config.job.dump_folder}/gnorm_rank{rank}.txt"
+            with open(gnorm_log_file, "a") as f:
+                f.write(
+                    f"step={train_state.step}, "
+                    f"local_gnorm={local_grad_norm_sq:.6f}\n"
+                )
+            # ===end===== record square of gradient norm at local rank before all-reduce ==========
+
+            # Manually all-reduce
+            for p in all_params:
+                if p.grad is not None:
+                    dist.all_reduce(p.grad,op=dist.ReduceOp.AVG)
+
+            # ===start===== record square gradient norm over ranks after all-reduce ==========
+            if int(local_rank) == 0:
+                updated_grads_with_grad = [p.grad for p in all_params if p.grad is not None]
+                # global_grad_norm_sq = torch.norm(
+                #             torch.stack([g.detach().to_local().norm(2.0) for g in updated_grads_with_grad]),
+                #             p=2.0,
+                #         ) ** norm_type 
+                global_grad_norm_sq = sum(
+                    get_local_tensor(g.detach()).norm(norm_type).item() ** norm_type
+                    for g in updated_grads_with_grad
+                )
+                
+                logger.info(
+                    f"[Rank {rank} / Local Rank {local_rank}] "
+                    f"Global squared gradient norm (after all-reduce): {global_grad_norm_sq:.6f}"
+                )
+                global_gnorm_log_file = f"{job_config.job.dump_folder}/gnorm_global.txt"
+                with open(global_gnorm_log_file, "a") as f:
+                    f.write(
+                        f"step={train_state.step}, "
+                        f"global_gnorm={global_grad_norm_sq:.6f}\n"
+                    )
+            # ===end===== record square gradient norm over ranks after all-reduce ==========
+           
             # clip gradients
             grad_norm = dist_utils.clip_grad_norm_(
                 [p for m in model_parts for p in m.parameters()],
