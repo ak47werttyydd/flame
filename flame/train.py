@@ -503,8 +503,22 @@ def main(job_config: JobConfig):
                     )
                 else:
                     # Non-PP forward / backward
-                    # disable grad all-reduce on DDP 
-                    no_sync_ctx = model.no_sync() if hasattr(model,'no_sync') else nullcontext()
+                    # ========== 获取本地梯度（all-reduce 前）==========
+                    #
+                    # 如果设置了 SKIP_DDP_FOR_LOCAL_GRAD=1，DDP 包装已被跳过，
+                    # if SKIP_DDP_FOR_LOCAL_GRAD=1 is set, DDP wrapping is skipped, and gradients will not be automatically synchronized.
+                    # 梯度不会自动同步，我们可以直接获取本地梯度。
+                    # 如果没有设置，尝试使用 no_sync()。
+
+                    skip_ddp = os.environ.get("SKIP_DDP_FOR_LOCAL_GRAD", "0") == "1"
+
+                    if skip_ddp:
+                        # DDP 被跳过，直接计算，梯度不会自动同步
+                        no_sync_ctx = nullcontext()
+                    else:
+                        # DDP 启用，尝试用 no_sync() 禁用自动同步
+                        no_sync_ctx = model.no_sync() if hasattr(model, 'no_sync') else nullcontext()
+
                     with no_sync_ctx:
                         with train_context(optional_context_parallel_ctx):
                             with maybe_enable_amp:
@@ -523,60 +537,44 @@ def main(job_config: JobConfig):
                 losses.append(loss)
             loss = sum(losses)
 
-            # ===start===== record gradient norm at local rank before manually all-reduce ==========
-            # collect parameters
+            # ===start===== 记录本地梯度范数 record local gnorm of a rank ==========
+            rank = int(os.environ.get("RANK", 0))
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
             all_params = [p for m in model_parts for p in m.parameters()]
             grads_with_grad = [p.grad for p in all_params if p.grad is not None]
 
-            # square of L2 norm
             if len(grads_with_grad) > 0:
                 device = grads_with_grad[0].device
                 norm_type = 2.0
-                # search by for each （not go through this branch）
-                # if hasattr(torch._C, "_nn") and hasattr(torch._C._nn, "utils"):
-                #     # g.norm(2.0) is the norm of a parameter (a tensor with entries)
-                #     # g.norm(norm_type) ** norm_type is the sum of (each entry)^2 
-                #     local_grad_norms_sq = [
-                #         g.norm(norm_type) ** norm_type for g in grads_with_grad
-                #     ]
-                #     local_grad_norm_sq = sum(local_grad_norms_sq)
-                #     # local_grad_norm = local_total_norm_sq ** (1.0 / norm_type)
-                # else:
-                #     # fall back to compute by torch (enter here!)
-                #     local_grad_norm_sq = torch.norm(
-                #         torch.stack([g.detach().to_local().norm(2.0) for g in grads_with_grad]),
-                #         p=2.0,
-                #     ) ** norm_type 
+                # 计算本地梯度范数平方（此时梯度未同步）
                 local_grad_norm_sq = sum(
                     get_local_tensor(g.detach()).norm(norm_type).item() ** norm_type
                     for g in grads_with_grad
                 )
-
-            else: #empty square of the local norm
-                local_grad_norm_sq = torch.tensor(0.0, device=device)
-
-            # get current rank ID
-            rank = int(os.environ.get("RANK", 0))
-            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            else:
+                local_grad_norm_sq = 0.0
+                device = torch.device(f"cuda:{local_rank}")
 
             logger.info(
                 f"[Rank {rank} / Local Rank {local_rank}] "
                 f"Local squared gradient norm (before all-reduce): {local_grad_norm_sq:.6f}"
             )
 
-            # save
+            # 保存到文件 save to file
             gnorm_log_file = f"{job_config.job.dump_folder}/gnorm_rank{rank}.txt"
             with open(gnorm_log_file, "a") as f:
                 f.write(
                     f"step={train_state.step}, "
-                    f"local_gnorm={local_grad_norm_sq:.6f}\n"
+                    f"local_gnorm_sq={local_grad_norm_sq:.6f}\n"
                 )
-            # ===end===== record square of gradient norm at local rank before all-reduce ==========
+            # ===end===== 记录本地梯度范数 record local gnorm of a rank ==========
 
-            # Manually all-reduce
+            # 手动 all-reduce 同步梯度
+            # manually all-reduce
             for p in all_params:
                 if p.grad is not None:
-                    dist.all_reduce(p.grad,op=dist.ReduceOp.AVG)
+                    dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
 
             # ===start===== record square gradient norm over ranks after all-reduce ==========
             if int(local_rank) == 0:

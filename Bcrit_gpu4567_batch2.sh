@@ -1,13 +1,13 @@
-export HF_HOME=/md0/a00652497/2026/HF_HOME
+export HF_HOME=/home/a84400789/.cache/huggingface
 export PYTHONHTTPSVERIFY=0
 export WANDB_MODE=offline
 export SENTRY_DSN=""
-# 跳过 DDP 包装，以便获取每个 rank 的真正本地梯度（all-reduce 前）
+# skip DDP wrapper，to get the gradient of each rank before all-reduce
 export SKIP_DDP_FOR_LOCAL_GRAD=1
 
-BASE_DUMP_PREFIX="exp/gdn-340M-4K-20B/bsize9.seqlen4096.context4096.warmup1024.update1.steps271266.DDP.Bcrit"
+BASE_DUMP_PREFIX="exp/gdn-340M-4K-20B/bsize2.seqlen4096.context4096.warmup1024.update1.steps610350.DDPNoWrapper.Bcrit"
 MODEL_REPO="m-a-p/340M-20B-GatedDeltaNet-pure-baseline"
-DATASET_DIR="/home/a84400789/data/fineweb-edu-100BT"
+DATASET_DIR="/home/a84400789/.cache/data"
 
 LRS=(3e-4)
 
@@ -16,8 +16,8 @@ for LR in "${LRS[@]}"; do
   LOG_FILE="${DUMP_FOLDER}.log"
 
   echo "===== Running LR=${LR} -> ${DUMP_FOLDER} ====="
-  export NGPU=2
-  CUDA_VISIBLE_DEVICES=4,5 NNODE=1 LOG_RANK=0 bash /home/a84400789/flame/train.sh \
+  export NGPU=4
+  CUDA_VISIBLE_DEVICES=4,5,6,7 NNODE=1 LOG_RANK=0 bash /home/a84400789/flame/train.sh \
     --job.config_file flame/models/fla.toml \
     --job.dump_folder "${DUMP_FOLDER}" \
     --model.config "${MODEL_REPO}" \
@@ -28,11 +28,11 @@ for LR in "${LRS[@]}"; do
     --lr_scheduler.warmup_steps 1024 \
     --lr_scheduler.lr_min 0.1 \
     --lr_scheduler.decay_type cosine \
-    --training.batch_size 9 \
+    --training.batch_size 2 \
     --training.seq_len 4096 \
     --training.context_len 4096 \
     --training.gradient_accumulation_steps 1 \
-    --training.steps 271266 \
+    --training.steps 610350 \
     --training.max_norm 1.0 \
     --training.skip_nan_inf \
     --training.dataset "${DATASET_DIR}" \

@@ -100,12 +100,18 @@ def parallelize_fla(
     elif parallel_dims.dp_replicate_enabled:
         if world_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
-            model,
-            world_mesh,
-            enable_compile=job_config.training.compile,
-            enable_compiled_autograd=job_config.experimental.enable_compiled_autograd,
-        )
+        # 检查是否要跳过 DDP（用于计算 critical batch size 时获取本地梯度）
+        import os
+        skip_ddp = os.environ.get("SKIP_DDP_FOR_LOCAL_GRAD", "0") == "1"
+        if skip_ddp:
+            logger.info("SKIP_DDP_FOR_LOCAL_GRAD=1: Skipping DDP wrapper, will manually sync gradients")
+        else:
+            apply_ddp(
+                model,
+                world_mesh,
+                enable_compile=job_config.training.compile,
+                enable_compiled_autograd=job_config.experimental.enable_compiled_autograd,
+            )
 
 
 class TPPlan:
