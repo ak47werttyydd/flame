@@ -9,10 +9,10 @@ ANSI_ESCAPE = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
 STEP_LOSS_RE = re.compile(r'step:\s*(\d+)\s+loss:\s*([0-9.]+)')
 
 # 正则：提取 step / local_gnorm (from gnorm_rank*.txt)
-STEP_LOCAL_GNORM_RE = re.compile(r'step=(\d+),\s*local_gnorm=([0-9.]+)')
+STEP_LOCAL_GNORM_RE = re.compile(r'step=(\d+),\s*local_gnorm_sq=([0-9.]+)')
 
 # 正则：提取 step / global_gnorm (from gnorm_global.txt)
-STEP_GLOBAL_GNORM_RE = re.compile(r'step=(\d+),\s*global_gnorm=([0-9.]+)')
+STEP_GLOBAL_GNORM_RE = re.compile(r'step=(\d+),\s*global_gnorm=([0-9.]+)') # should be global_gnorm_sq, but some legacy log uses global_gnorm
 
 
 def parse_stderr_log(log_path: str) -> Dict[int, float]:
@@ -69,7 +69,6 @@ def parse_gnorm_rank_file(gnorm_path: str) -> Dict[int, float]:
                 step = int(m.group(1))
                 gnorm_sq = float(m.group(2))
                 step_gnorm[step] = gnorm_sq
-    
     return step_gnorm
 
 
@@ -186,7 +185,7 @@ def compute_critical_batch_size(
     all_steps = set(global_step_gnorm.keys())
     for rank, step_gnorm in rank_step_gnorm.items():
         all_steps &= set(step_gnorm.keys())
-    
+
     if not all_steps:
         print("Warning: No common steps found between rank gnorms and global gnorm")
         return {}
@@ -258,7 +257,7 @@ def print_global_steps_gnorm(num_step: int, global_step_gnorm: Dict[int, float])
 
 
 def print_critical_batch_size(results: Dict[int, Tuple[float, float, float, float, float]], 
-                               num_step: int = None):
+                               num_step: int = None, interval: int = 1):
     """
     打印 Critical Batch Size 结果
     
@@ -266,7 +265,7 @@ def print_critical_batch_size(results: Dict[int, Tuple[float, float, float, floa
     """
     sorted_steps = sorted(results.keys())
     if num_step is not None:
-        sorted_steps = [s for s in sorted_steps if s <= num_step]
+        sorted_steps = [s for s in sorted_steps if s <= num_step and (s % interval == 0)]
     
     print("=" * 100)
     print(f"{'Step':>6} | {'B_crit':>12} | {'|G|^2_ewma':>14} | {'S_ewma':>14} | {'|G|^2_inst':>14} | {'S_inst':>14}")
@@ -281,40 +280,41 @@ def print_critical_batch_size(results: Dict[int, Tuple[float, float, float, floa
 
 if __name__ == "__main__":
     # 配置参数
-    project_dir = "exp/gdn-340M-4K-20B/batch1.seqlen4096.context4096.warmup1024.update1.steps135633.lr3e-4.cosine"
-    logs_dir = f"{project_dir}/logs/none_nnw03ofw/attempt_0/"
-    avg_log_path = f"{project_dir}.log"
+    project_dir = "exp/gdn-340M-4K-20B/bsize10.seqlen4096.context4096.warmup1024.update1.steps122070.DDPNoWrapper.Bcrit.lr3e-4.cosine"
+    # logs_dir = f"{project_dir}/logs/none_nnw03ofw/attempt_0/"
+    # avg_log_path = f"{project_dir}.log"
     
     # 批量大小配置
-    B_small = 1  # 单卡 batch size（根据实际情况修改）
+    B_small = 10  # 单卡 batch size（根据实际情况修改）
     num_cards = 4  # 卡数（根据实际情况修改）
     
     # EWMA 参数
-    alpha = 0.1  # |G|^2 的衰减参数
-    beta = 0.1   # S 的衰减参数
+    alpha = 0.02  # |G|^2 的衰减参数
+    beta = 0.005  # S 的衰减参数
     
     # 解析 loss
-    rank_step_loss = parse_all_ranks(logs_dir)
-    avg_step_loss = parse_stderr_log(avg_log_path)
+    # rank_step_loss = parse_all_ranks(logs_dir)
+    # avg_step_loss = parse_stderr_log(avg_log_path)
     
     # 解析 gnorm
     rank_step_gnorm = parse_all_rank_gnorms(project_dir)
     global_step_gnorm = parse_global_gnorm(project_dir)
     
-    print(f"Parsed {len(rank_step_loss)} ranks for loss")
-    print(f"Parsed {len(rank_step_gnorm)} ranks for local gnorm")
+    # print(f"Parsed {len(rank_step_loss)} ranks for loss")
+    for rank, step_gnorm in sorted(rank_step_gnorm.items()):
+        print(f"Rank {rank} has {len(step_gnorm)} steps of local gnorm")
     print(f"Parsed {len(global_step_gnorm)} steps for global gnorm")
     
     # 打印部分 loss
-    print("\n--- Loss (first 10 steps) ---")
-    print_rank_steps_loss(10, rank_step_loss)
+    # print("\n--- Loss (first 10 steps) ---")
+    # print_rank_steps_loss(10, rank_step_loss)
     
     # 打印部分 gnorm
-    print("\n--- Local Gnorm (first 10 steps) ---")
-    print_rank_steps_gnorm(10, rank_step_gnorm)
+    # print("\n--- Local Gnorm (first 10 steps) ---")
+    # print_rank_steps_gnorm(10, rank_step_gnorm)
     
-    print("\n--- Global Gnorm (first 10 steps) ---")
-    print_global_steps_gnorm(10, global_step_gnorm)
+    # print("\n--- Global Gnorm (first 10 steps) ---")
+    # print_global_steps_gnorm(10, global_step_gnorm)
     
     # 计算 Critical Batch Size
     if rank_step_gnorm and global_step_gnorm:
@@ -329,10 +329,10 @@ if __name__ == "__main__":
             num_cards=num_cards,
             alpha=alpha,
             beta=beta,
-            num_steps=100  # 计算前 100 步
+            num_steps=122070  # 计算前 100 步
         )
         
-        print_critical_batch_size(cbs_results, num_step=100)
+        print_critical_batch_size(cbs_results, num_step=122070, interval=1000)
     else:
         print("\nWarning: Cannot compute Critical Batch Size - missing gnorm data")
         print(f"  rank_step_gnorm has {len(rank_step_gnorm)} ranks")

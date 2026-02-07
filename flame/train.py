@@ -596,7 +596,7 @@ def main(job_config: JobConfig):
                 with open(global_gnorm_log_file, "a") as f:
                     f.write(
                         f"step={train_state.step}, "
-                        f"global_gnorm={global_grad_norm_sq:.6f}\n"
+                        f"global_gnorm_sq={global_grad_norm_sq:.6f}\n"
                     )
             # ===end===== record square gradient norm over ranks after all-reduce ==========
            
