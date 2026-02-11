@@ -14,7 +14,7 @@ TOTAL_TOKENS=20000000000
 MAX_BATCH_SIZE=17
 
 # Global batch sizes in tokens
-GLOBAL_BATCH_SIZES=(4000000 6000000 8000000 10000000)
+GLOBAL_BATCH_SIZES=(50000 196000 393000 442000 753000 3000000)
 
 for GLOBAL_BATCH_TOKENS in "${GLOBAL_BATCH_SIZES[@]}"; do
   # Calculate per-GPU batch size and gradient accumulation steps
@@ -37,12 +37,13 @@ for GLOBAL_BATCH_TOKENS in "${GLOBAL_BATCH_SIZES[@]}"; do
   
   # Calculate training steps for 20B tokens
   REAL_GLOBAL_BATCH_TOKENS=$((BATCH_SIZE * SEQ_LEN * NGPU * GRAD_ACCUM))
-  STEPS=$((TOTAL_TOKENS / REAL_GLOBAL_BATCH_TOKENS))
+  REAL_STEPS=$((TOTAL_TOKENS / REAL_GLOBAL_BATCH_TOKENS))
+  CHECKPOINT_STEPS=$((TOTAL_TOKENS / GLOBAL_BATCH_TOKENS))
   
-  DUMP_FOLDER="${BASE_DUMP_PREFIX}.ngpu${NGPU}.gbs${GLOBAL_BATCH_TOKENS}.bs${BATCH_SIZE}.ga${GRAD_ACCUM}.steps${STEPS}"
+  DUMP_FOLDER="${BASE_DUMP_PREFIX}.gbs${GLOBAL_BATCH_TOKENS}.bs${BATCH_SIZE}.ga${GRAD_ACCUM}.steps${CHECKPOINT_STEPS}"
   LOG_FILE="${DUMP_FOLDER}.log"
 
-  echo "===== Running Global Batch=${GLOBAL_BATCH_TOKENS} tokens (BS=${BATCH_SIZE}, GA=${GRAD_ACCUM}, Steps=${STEPS}) -> ${DUMP_FOLDER} ====="
+  echo "===== Running Global Batch=${GLOBAL_BATCH_TOKENS} tokens (BS=${BATCH_SIZE}, GA=${GRAD_ACCUM}, Steps=${REAL_STEPS}) -> ${DUMP_FOLDER} ====="
 
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NNODE=1 NGPU=${NGPU} LOG_RANK=0 bash /home/a84400789/flame/train.sh \
     --job.config_file flame/models/fla.toml \
@@ -59,7 +60,7 @@ for GLOBAL_BATCH_TOKENS in "${GLOBAL_BATCH_SIZES[@]}"; do
     --training.seq_len ${SEQ_LEN} \
     --training.context_len ${SEQ_LEN} \
     --training.gradient_accumulation_steps ${GRAD_ACCUM} \
-    --training.steps ${STEPS} \
+    --training.steps ${REAL_STEPS} \
     --training.max_norm 1.0 \
     --training.skip_nan_inf \
     --training.dataset "${DATASET_DIR}" \
@@ -69,10 +70,10 @@ for GLOBAL_BATCH_TOKENS in "${GLOBAL_BATCH_SIZES[@]}"; do
     --training.prefetch_factor 2 \
     --training.seed 42 \
     --checkpoint.interval 20480 \
-    --checkpoint.load_step 0 \
+    --checkpoint.load_step -1 \
     --checkpoint.keep_latest_k 2 \
     --metrics.log_freq 1 \
-    2>&1 | tee "${LOG_FILE}"
+    2>&1 | tee -a "${LOG_FILE}"
 
   RC=${PIPESTATUS[0]}
   if [ "$RC" -ne 0 ]; then
