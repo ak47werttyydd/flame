@@ -1,18 +1,20 @@
 # docker-compose.yml for Flame Training (Dev Mode)
-# 使用方法:
-#   docker-compose up -d       # 启动容器
-#   docker-compose exec flame bash  # 进入容器
-#   docker-compose down        # 停止容器
+#
+# Usage:
+#   docker-compose up -d          # Start container in background
+#   docker-compose exec flame bash # Enter the running container
+#   docker-compose down            # Stop and remove container
+#   docker-compose logs -f flame   # View container logs
+#
+# The container runs as a daemon with an interactive shell.
+# You can enter and exit freely without stopping the container.
 
 services:
   flame:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: flame:latest
-    container_name: flame-dev
-    
-    # GPU 配置
+    image: daal/flame:v0
+    container_name: gdn-pretrain
+
+    # GPU configuration
     deploy:
       resources:
         reservations:
@@ -20,17 +22,17 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    
-    # IPC 和 ulimits 配置 (分布式训练需要)
+
+    # IPC and ulimits (required for distributed training)
     ipc: host
     ulimits:
       memlock: -1
       stack: 67108864
-    
-    # 网络配置 (多节点训练需要)
+
+    # Network configuration (required for multi-node training)
     network_mode: host
-    
-    # 环境变量
+
+    # Environment variables
     environment:
       - NGPU=8
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
@@ -40,21 +42,18 @@ services:
       - WANDB_PROJECT=flame-training
       - MASTER_ADDR=${MASTER_ADDR:-localhost}
       - MASTER_PORT=${MASTER_PORT:-29500}
-    
-    # 数据卷挂载
+
+    # Volume mounts (host home dir mapped into container)
     volumes:
-      # [核心] Flame 源码 - 开发模式，代码改动实时生效
-      - /home/a84400789/flame:/home/a84400789/flame
-      # HuggingFace 缓存 (与宿主机共享，避免重复下载)
-      - /home/a84400789/.cache/huggingface:/home/a84400789/.cache/huggingface
-    
-    # 工作目录
-    working_dir: /home/a84400789/flame
-    
-    # 保持容器运行
+      - /home/a84400789:/home/a84400789
+
+    # Working directory
+    working_dir: /home/a84400789
+
+    # Keep container running as a daemon
     stdin_open: true
     tty: true
     command: /bin/bash
-    
-    # 重启策略
+
+    # Restart policy
     restart: unless-stopped
