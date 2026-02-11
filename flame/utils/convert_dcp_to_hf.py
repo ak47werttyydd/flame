@@ -26,13 +26,13 @@ def save_pretrained(
 ):
     logger.info(f"Loading the config from {config}")
     config = AutoConfig.from_pretrained(config, trust_remote_code=True)
-
-    logger.info(f"Saving the config to {path}")
-    config.save_pretrained(path)
+    hf_ckpt_dir = os.path.join(path, f'hf_checkpoint/step-{step}')
+    logger.info(f"Saving the config to {hf_ckpt_dir}")
+    config.save_pretrained(hf_ckpt_dir)
     logger.info(f"Loading the tokenizer from {tokenizer}")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
-    logger.info(f"Saving the tokenizer to {path}")
-    tokenizer.save_pretrained(path)
+    logger.info(f"Saving the tokenizer to {hf_ckpt_dir}")
+    tokenizer.save_pretrained(hf_ckpt_dir)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         checkpoint = os.path.join(path, f'checkpoint/step-{step}')
@@ -50,8 +50,9 @@ def save_pretrained(
         # torch.load now with default weights_only=True will work
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu')['model'])
 
-        logger.info(f"Saving the model to {path}")
-        model.save_pretrained(path)
+        logger.info(f"Saving the model to {hf_ckpt_dir}")
+        model._tied_weights_keys = {}
+        model.save_pretrained(hf_ckpt_dir)
 
 
 if __name__ == "__main__":
