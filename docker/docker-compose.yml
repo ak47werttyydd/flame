@@ -1,19 +1,22 @@
-# docker-compose.yml for Flame Training (Dev Mode)
+# docker-compose.yml for environment with Torch,Flame Training, lm-eval-harness (Dev Mode)
 #
 # Usage:
-#   docker-compose -f /home/a84400789/flame/docker/docker-compose.yml up -d          # Start container in background
-#   docker-compose -f /home/a84400789/flame/docker/docker-compose.yml exec gdn-pretrain bash # Enter the running container
-#   docker exec -it gdn-pretrain bash # Alternative way to enter the running container 
-#   docker-compose -f /home/a84400789/flame/docker/docker-compose.yml down            # Stop and remove container
-#   docker-compose logs -f gdn-pretrain   # View container logs
+#   #log in H100 node01,02
+#   cd /home/docker
+#   # copy to make your docker-compose.yml and change service name and container name in your docker-compose.yml
+#   docker-compose -f /home/docker/<your docker-compose.yml> up -d          # Start container in background
+#   docker-compose -f /home/docker/<your docker-compose.yml> exec <service name> bash # Enter the running container
+#   docker exec -it <container name> bash # Alternative way to enter the running container 
+#   docker-compose -f /home/docker/<your docker-compose.yml> down            # Stop and remove container
+#   docker-compose logs -f <service name>    # View container logs
 #
 # The container runs as a daemon with an interactive shell.
 # You can enter and exit freely without stopping the container.
 
 services:
-  gdn-pretrain:
+  gdn-pretrain:  # Customize your Service name
     image: daal/flame:v0
-    container_name: gdn-pretrain
+    container_name: gdn-pretrain  # Customize your container name
 
     # GPU configuration
     deploy:
@@ -49,7 +52,7 @@ services:
       - /home:/home
 
     # Working directory
-    working_dir: /home/a84400789
+    working_dir: /home
 
     # Keep container running as a daemon
     stdin_open: true
