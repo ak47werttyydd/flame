@@ -46,7 +46,7 @@ services:
 
     # Volume mounts (host home dir mapped into container)
     volumes:
-      - /home/a84400789:/home/a84400789
+      - /home:/home
 
     # Working directory
     working_dir: /home/a84400789
