@@ -6,6 +6,7 @@ import io
 import os
 import tempfile
 from datetime import timedelta
+from typing import Optional
 
 import fla  # noqa
 import torch
@@ -14,7 +15,7 @@ from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 from torchtitan.tools.logging import init_logger, logger
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-import custom_models
+# import custom_models
 
 
 @torch.inference_mode()
@@ -22,11 +23,12 @@ def save_pretrained(
     path: str,
     step: int,
     config: str,
-    tokenizer: str
+    tokenizer: str,
+    hf_ckpt_dir: Optional[str]
 ):
     logger.info(f"Loading the config from {config}")
     config = AutoConfig.from_pretrained(config, trust_remote_code=True)
-    hf_ckpt_dir = os.path.join(path, f'hf_checkpoint/step-{step}')
+    hf_ckpt_dir = os.path.join(path, f'hf_checkpoint/step-{step}') if hf_ckpt_dir is None else hf_ckpt_dir  # defualt huggingface checkpoint directory
     logger.info(f"Saving the config to {hf_ckpt_dir}")
     config.save_pretrained(hf_ckpt_dir)
     logger.info(f"Loading the tokenizer from {tokenizer}")
@@ -62,5 +64,6 @@ if __name__ == "__main__":
     parser.add_argument("--step", type=int, required=True)
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--tokenizer", type=str, required=True)
+    parser.add_argument("--hf-ckpt-dir", type=str, default=None)
     args = parser.parse_args()
-    save_pretrained(args.path, args.step, args.config, args.tokenizer)
+    save_pretrained(args.path, args.step, args.config, args.tokenizer, args.hf_ckpt_dir)
