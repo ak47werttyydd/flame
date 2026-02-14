@@ -14,8 +14,8 @@ while true; do
   LOG_FILE="${DUMP_FOLDER}.log"
 
   echo "===== Running LR=${LR} -> ${DUMP_FOLDER} ====="
-  export NGPU=7
-  CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 NNODE=1 LOG_RANK=1 bash /home/a84400789/flame/train.sh \
+  export NGPU=8
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 NNODE=1 LOG_RANK=0 bash /home/a84400789/flame/train.sh \
     --job.config_file flame/models/fla.toml \
     --job.dump_folder "${DUMP_FOLDER}" \
     --model.config "${MODEL_REPO}" \
