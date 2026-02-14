@@ -9,7 +9,8 @@
 # print(f"real_global_batch_tokens is {real_global_batch_tokens}")
 
 
-alleged_global_batch_tokens = [50000, 196000, 393000, 442000, 753000, 3000000, 4000000, 6000000]
+alleged_global_batch_tokens = [50000, 196000, 393000, 442000, 753000, 3000000, 4000000, 6000000, 8000000,10000000]
+# alleged_global_batch_tokens = [8000000,10000000]
 seq_len = 4096
 ngpu = 8
 alleged_total_data_tokens = 20000000000  # 20B tokens
@@ -31,12 +32,14 @@ for alleged_tokens, batch_size_x_ga in zip(alleged_global_batch_tokens, samples_
     real_global_batch_tokens = batch_size * seq_len * ngpu * grad_accum_steps
     prev_steps = alleged_total_data_tokens // alleged_tokens
     steps_with_real_tokens = alleged_total_data_tokens // real_global_batch_tokens
-    real_total_data_tokens = real_global_batch_tokens * ( prev_steps )  
+    pre_total_data_tokens = real_global_batch_tokens * prev_steps
+    corrected_total_data_tokens = real_global_batch_tokens * steps_with_real_tokens
     
     print(f"Alleged Global Batch Tokens: {alleged_tokens:>8} tokens | "
           f"batch_size: {batch_size:>2} | "
           f"grad_accum: {grad_accum_steps:>3} | "
           f"Real Global Batch Tokens: {real_global_batch_tokens:>8} tokens | "
           f"Previous Steps: {prev_steps:>8} steps | "
-          f"Real Total Data Tokens: {real_total_data_tokens:>12} tokens | "
+          f"Previous Total Data Tokens: {pre_total_data_tokens:>12} tokens | "
+          f"Corrected Total Data Tokens: {corrected_total_data_tokens:>12} tokens | "
           f"Actually Needed Steps: {steps_with_real_tokens:>8} steps")
