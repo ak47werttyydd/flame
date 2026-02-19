@@ -17,10 +17,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 # import custom_models
 
-def default_hf_ckpt_dir(path: str, step: int):
-    ckpt_name = path.split(sep='exp/')[1].replace("/",".")+".ckpt_step"+str(step)
-    default_ckpt_path=os.path.join("/home/a84400789/lm-evaluation-harness/hf_ckpt",ckpt_name)
-    return default_ckpt_path
 
 @torch.inference_mode()
 def save_pretrained(
@@ -32,8 +28,7 @@ def save_pretrained(
 ):
     logger.info(f"Loading the config from {config}")
     config = AutoConfig.from_pretrained(config, trust_remote_code=True)
-    # hf_ckpt_dir = os.path.join(path, f'hf_checkpoint/step-{step}') if hf_ckpt_dir is None else hf_ckpt_dir  # defualt huggingface checkpoint directory
-    hf_ckpt_dir = default_hf_ckpt_dir(path, step) if hf_ckpt_dir is None else hf_ckpt_dir  
+    hf_ckpt_dir = os.path.join(path, f'hf_checkpoint/step-{step}') if hf_ckpt_dir is None else hf_ckpt_dir  # defualt huggingface checkpoint directory
     logger.info(f"Saving the config to {hf_ckpt_dir}")
     config.save_pretrained(hf_ckpt_dir)
     logger.info(f"Loading the tokenizer from {tokenizer}")
@@ -50,18 +45,33 @@ def save_pretrained(
         logger.info(f"Initializing the model from config\n{config}")
         model = AutoModelForCausalLM.from_config(config)
         logger.info(model)
-        logger.info("Loading state dict from the checkpoint")
+        logger.info("Loading state dict from the dcp checkpoint")
 
         # Add datetime.timedelta and io.BytesIO to safe globals
         torch.serialization.add_safe_globals([timedelta, io.BytesIO])
         # torch.load now with default weights_only=True will work
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu')['model'])
 
+        # print A_log loaded from DCP
+        for name, param in model.named_parameters():
+            if 'A_log' in name:
+                print(f"[before save] {name}: {param.data}")
+                if torch.isnan(param).any():
+                    print(f"  !!! NaN introduced by save/load cycle")
+        
         logger.info(f"Saving the model to {hf_ckpt_dir}")
         model._tied_weights_keys = {}
         model.save_pretrained(hf_ckpt_dir)
 
+        # print A_log loaded from HF ( DCP -> HF )
+        model2 = AutoModelForCausalLM.from_pretrained(hf_ckpt_dir, trust_remote_code=True)
+        for name, param in model2.named_parameters():
+            if 'A_log' in name:
+                print(f"[after reload] {name}: {param.data}")
+                if torch.isnan(param).any():
+                    print(f"  !!! NaN introduced by save/load cycle")
 
+        
 if __name__ == "__main__":
     init_logger()
     parser = argparse.ArgumentParser("Convert DCP format model weights to huggingface-style.")
@@ -72,3 +82,4 @@ if __name__ == "__main__":
     parser.add_argument("--hf-ckpt-dir", type=str, default=None)
     args = parser.parse_args()
     save_pretrained(args.path, args.step, args.config, args.tokenizer, args.hf_ckpt_dir)
+    # save_pretrained(args.path, args.step, args.config)
