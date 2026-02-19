@@ -63,7 +63,7 @@ RUN pip install --upgrade pip setuptools wheel
 
 # Hugging Face 生态系统
 RUN pip install --upgrade \
-    transformers \
+    transformers==4.51.3 \
     datasets \
     accelerate \
     tokenizers \
