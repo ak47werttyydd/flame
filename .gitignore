@@ -4,9 +4,6 @@ test.py
 # data files
 data
 
-# bash scripts
-*.sh
-
 # docs
 docs/_build
 

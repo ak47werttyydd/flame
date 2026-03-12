@@ -32,8 +32,8 @@ def save_pretrained(
 ):
     logger.info(f"Loading the config from {config}")
     config = AutoConfig.from_pretrained(config, trust_remote_code=True)
-    # hf_ckpt_dir = os.path.join(path, f'hf_checkpoint/step-{step}') if hf_ckpt_dir is None else hf_ckpt_dir  # defualt huggingface checkpoint directory
-    hf_ckpt_dir = default_hf_ckpt_dir(path, step) if hf_ckpt_dir is None else hf_ckpt_dir  
+    hf_ckpt_dir = os.path.join(path, f'hf_checkpoint/step-{step}') if hf_ckpt_dir is None else hf_ckpt_dir  # defualt huggingface checkpoint directory
+    # hf_ckpt_dir = default_hf_ckpt_dir(path, step) if hf_ckpt_dir is None else hf_ckpt_dir  
     logger.info(f"Saving the config to {hf_ckpt_dir}")
     config.save_pretrained(hf_ckpt_dir)
     logger.info(f"Loading the tokenizer from {tokenizer}")
