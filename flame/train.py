@@ -189,7 +189,7 @@ def main(job_config: JobConfig):
     # 3. vocab size from tokenizer
     # 4. context_len base on inputs
     if parallel_dims.tp_enabled:
-        if model_config.fuse_norm:
+        if getattr(model_config, "fuse_norm", False):
             logger.warning(
                 f"{color.red}"
                 f"Fused norm is not compatible with tensor parallelism. "
@@ -198,7 +198,7 @@ def main(job_config: JobConfig):
             )
             model_config.fuse_norm = False
     if parallel_dims.loss_parallel_enabled:
-        if model_config.fuse_linear_cross_entropy:
+        if getattr(model_config, "fuse_linear_cross_entropy", False):
             logger.warning(
                 f"{color.red}"
                 f"Loss parallel enabled. Disabling fused cross entropy for now."
@@ -490,12 +490,18 @@ def main(job_config: JobConfig):
                     # Non-PP forward / backward
                     with train_context(optional_context_parallel_ctx):
                         with maybe_enable_amp:
-                            output = model(
+                            forward_kwargs = dict(
                                 input_ids=input_ids,
                                 labels=labels,
                                 position_ids=position_ids,
-                                cu_seqlens=cu_seqlens,
-                        )
+                            )
+                            # cu_seqlens is FLA-specific; only pass if model accepts it
+                            if cu_seqlens is not None:
+                                import inspect
+                                sig = inspect.signature(model.forward)
+                                if "cu_seqlens" in sig.parameters:
+                                    forward_kwargs["cu_seqlens"] = cu_seqlens
+                            output = model(**forward_kwargs)
                         loss = (
                             output.loss
                             / job_config.training.gradient_accumulation_steps

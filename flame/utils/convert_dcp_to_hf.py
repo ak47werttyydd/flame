@@ -58,7 +58,8 @@ def save_pretrained(
         model.load_state_dict(torch.load(checkpoint_path, map_location='cpu')['model'])
 
         logger.info(f"Saving the model to {hf_ckpt_dir}")
-        model._tied_weights_keys = {}
+        if hasattr(model, '_tied_weights_keys'):
+            model._tied_weights_keys = {}
         model.save_pretrained(hf_ckpt_dir)
 
 

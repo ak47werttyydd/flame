@@ -1,0 +1,89 @@
+# ============================================================================
+# Dockerfile for Flame + Qwen3.5 MoE Training
+# ============================================================================
+# 基于原始 Flame Dockerfile, 升级 transformers>=5.3.0 以支持官方 Qwen3.5 模型
+#
+# 构建:
+#   cd /home/a84400789/flame_claude/docker
+#   docker build -f Dockerfile.qwen3_5 -t daal/flame-qwen35:v0 .
+#
+# 运行:
+#   docker run --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+#     --name qwen35 \
+#     -v /home/a84400789/flame_claude:/home/a84400789/flame \
+#     -v /home/a84400789/.cache:/home/a84400789/.cache \
+#     -it daal/flame-qwen35:v0
+# ============================================================================
+
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3
+FROM ${BASE_IMAGE}
+
+LABEL maintainer="a84400789"
+LABEL description="Flame + Qwen3.5 MoE (official HF model, FSDP)"
+LABEL version="0.1"
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# ============================================================================
+# 系统依赖
+# ============================================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git git-lfs vim htop tmux wget curl unzip \
+    && rm -rf /var/lib/apt/lists/* && apt-get clean
+
+RUN git lfs install
+
+RUN if [ -f /etc/pip/constraint.txt ]; then \
+        cp /etc/pip/constraint.txt /etc/pip/constraint.txt.bak; \
+    fi
+
+# ============================================================================
+# Python 依赖
+# ============================================================================
+RUN pip install --upgrade pip setuptools wheel
+
+# transformers >= 5.3.0 (官方 Qwen3.5 MoE 模型支持)
+RUN pip install --upgrade \
+    "transformers>=5.3.0" \
+    datasets \
+    accelerate \
+    tokenizers \
+    huggingface_hub \
+    safetensors
+
+RUN pip install --upgrade wandb tensorboard
+
+RUN pip install --upgrade \
+    einops ninja packaging pyyaml tomli toml tyro
+
+# ============================================================================
+# flash-linear-attention (FLA 模型仍然可用)
+# ============================================================================
+RUN pip uninstall -y flash-linear-attention fla-core 2>/dev/null || true && \
+    pip install -U --no-build-isolation git+https://github.com/fla-org/flash-linear-attention
+
+# ============================================================================
+# torchtitan (保持 0b44d4c 兼容 flame TrainSpec API)
+# ============================================================================
+RUN pip install git+https://github.com/pytorch/torchtitan.git@0b44d4c
+
+# ============================================================================
+# 目录结构
+# ============================================================================
+RUN mkdir -p /home/.cache/huggingface
+
+# ============================================================================
+# 环境变量
+# ============================================================================
+ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
+ENV NCCL_DEBUG=WARN
+ENV NCCL_IB_DISABLE=0
+ENV NCCL_P2P_DISABLE=0
+ENV TRITON_CACHE_DIR=/tmp/.triton
+ENV HF_HOME=/home/.cache/huggingface
+ENV NGPU=4
+
+WORKDIR /home
+
+CMD ["/bin/bash"]

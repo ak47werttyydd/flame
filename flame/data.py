@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import copy
-import glob as _glob
-import os
 import pickle
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,7 +11,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 import datasets
 import numpy as np
 import torch
-from datasets import Dataset, IterableDataset, concatenate_datasets, interleave_datasets, load_dataset
+from datasets import Dataset, IterableDataset, interleave_datasets, load_dataset
 from datasets.iterable_dataset import ShufflingConfig
 from torch.distributed.checkpoint.stateful import Stateful
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -544,40 +542,6 @@ class ParallelAwareDataLoader(StatefulDataLoader, Stateful):
         super().load_state_dict(pickle.loads(state_dict[f'rank_{self.rank}']))
 
 
-def _is_local_arrow_dir(path: str) -> bool:
-    """Return True if path is a local directory containing Arrow data files."""
-    if not os.path.isdir(path):
-        return False
-    return bool(_glob.glob(os.path.join(path, '**', '*.arrow'), recursive=True))
-
-
-def _load_local_arrow(
-    path: str,
-    split: str = 'train',
-    num_workers: int = 32,
-) -> Dataset:
-    """Load a local directory of Arrow IPC stream files as a map-style Dataset.
-
-    Uses Dataset.from_file() to memory-map each Arrow file directly, which avoids
-    creating a duplicate HuggingFace cache under ~/.cache/huggingface/datasets/.
-    Multiple files are concatenated via concatenate_datasets().  The resulting
-    map-style Dataset supports random-access shuffling and can be converted to an
-    IterableDataset with an arbitrary number of shards via to_iterable_dataset().
-
-    Discovers all *.arrow files under `path` recursively, excluding HuggingFace
-    cache files (those whose basename starts with 'cache-').
-    """
-    arrow_files = sorted([
-        f for f in _glob.glob(os.path.join(path, '**', '*.arrow'), recursive=True)
-        if not os.path.basename(f).startswith('cache-')
-    ])
-    if not arrow_files:
-        raise FileNotFoundError(f"No Arrow data files found in {path}")
-    logger.info(f"Loading {len(arrow_files)} local Arrow file(s) from {path} via Dataset.from_file()")
-    shards = [Dataset.from_file(f) for f in arrow_files]
-    return shards[0] if len(shards) == 1 else concatenate_datasets(shards)
-
-
 def build_dataset(
     dataset: str,
     dataset_name: str = None,
@@ -593,23 +557,19 @@ def build_dataset(
     color = utils.Color
     min_num_shards = dp_degree * num_workers if dp_degree else None
     if len(dataset.split(',')) == 1:
-        if _is_local_arrow_dir(dataset):
-            dataset = _load_local_arrow(dataset, split=dataset_split or 'train', num_workers=num_workers)
-        else:
-            dataset = load_dataset(
-                path=dataset,
-                name=dataset_name,
-                split=dataset_split,
-                data_dir=data_dir,
-                data_files=data_files,
-                trust_remote_code=True,
-                streaming=streaming,
-                num_proc=num_workers if not streaming else None,
-            )
+        dataset = load_dataset(
+            path=dataset,
+            name=dataset_name,
+            split=dataset_split,
+            data_dir=data_dir,
+            data_files=data_files,
+            trust_remote_code=True,
+            streaming=streaming,
+            num_proc=num_workers if not streaming else None,
+        )
         logger.info(f"Shuffling the dataset with seed {seed}")
-        if isinstance(dataset, Dataset):
-            # map-style dataset (non-streaming HF dataset or local Arrow loaded via from_file):
-            # shuffle is O(1) metadata-only and restores perfectly from checkpoint
+        if not streaming:
+            # the states of map-style dataset is recoverable after shuffling
             if seed is not None:
                 dataset = dataset.shuffle(seed=seed)
             if min_num_shards is not None:
@@ -618,7 +578,7 @@ def build_dataset(
             if min_num_shards is not None and dataset.num_shards < min_num_shards:
                 logger.warning(
                     f"{color.red}"
-                    f"Dataset has insufficient shards ({dataset.num_shards}). "
+                    f"Dataset {dataset} has insufficient shards ({dataset.num_shards}). "
                     f"Need {min_num_shards} shards minimum for {dp_degree} data parallel workers × "
                     f"{num_workers} dataloader workers. "
                     f"Disabling the streaming mode and resharding dataset to {min_num_shards} shards."
@@ -686,19 +646,20 @@ def build_dataset(
 
         subsets = []
         for i, prob in enumerate(data_probs):
-            if _is_local_arrow_dir(datasets[i]):
-                subset = _load_local_arrow(datasets[i], split=dataset_splits[i] or 'train', num_workers=num_workers)
-            else:
-                subset = load_dataset(
-                    path=datasets[i],
-                    name=dataset_names[i],
-                    split=dataset_splits[i],
-                    data_dir=data_dirs[i],
-                    data_files=data_files[i],
-                    trust_remote_code=True,
-                    streaming=streaming,
-                    num_proc=num_workers if not streaming else None,
-                )
+            subset = load_dataset(
+                path=datasets[i],
+                name=dataset_names[i],
+                split=dataset_splits[i],
+                data_dir=data_dirs[i],
+                data_files=data_files[i],
+                trust_remote_code=True,
+                streaming=streaming,
+                num_proc=(
+                    num_workers
+                    if not streaming
+                    else None
+                ),
+            )
             logger.info(
                 f"Subset {color.cyan}{datasets[i]}"
                 + (f":{dataset_names[i]} " if dataset_names[i] else " ")
@@ -707,8 +668,8 @@ def build_dataset(
             )
 
             logger.info(f"Shuffling the dataset with seed {seed}")
-            if isinstance(subset, Dataset):
-                # map-style dataset (non-streaming HF dataset or local Arrow loaded via from_file)
+            if not streaming:
+                # the states of map-style dataset is recoverable after shuffling
                 if seed is not None:
                     subset = subset.shuffle(seed=seed)
                 if min_num_shards is not None:
@@ -723,6 +684,8 @@ def build_dataset(
                         f"Resharding dataset to {min_num_shards} shards and disabling streaming mode."
                         f"{color.reset}"
                     )
+                    # again, it's ok to directly shuffle the map-style dataset
+                    # we expect an error raised if the map-style dataset still has not enough data shards
                     subset = load_dataset(
                         path=datasets[i],
                         name=dataset_names[i],
@@ -737,7 +700,7 @@ def build_dataset(
                         subset = subset.shuffle(seed=seed)
                     subset = subset.to_iterable_dataset(num_shards=min_num_shards)
                 else:
-                    # small buffer size: interleaving itself provides additional randomness
+                    # we set relatively small buffer size here as interleaving could provide some randomness
                     if seed is not None:
                         subset = shuffle(subset, seed=seed, buffer_size=max(128, 1024 // len(datasets)))
 

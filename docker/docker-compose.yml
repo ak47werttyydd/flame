@@ -1,64 +1,64 @@
-# docker-compose.yml for environment with Torch,Flame Training, lm-eval-harness (Dev Mode)
+# docker-compose.yml for Flame Training (Dev Mode)
+#
+# Make your own entrypoint first, here are three examples:
+#   /entrypoint-base.sh  - No flame, no lm-evaluation-harness, just verification of GPU setup and a clean environment for debugging
+#   /entrypoint-flame.sh - Install Adrian's flame
+#   /entrypoint-full.sh  - Install Adrian's flame + Adrian's lm-evaluation-harness 
+#   /entrypoint-razel.sh 
 #
 # Usage:
-#   #log in H100 node01,02
-#   cd /home/docker
-#   # copy to make your docker-compose.yml and change service name and container name in your docker-compose.yml
-#   docker-compose -f /home/docker/<your docker-compose.yml> up -d          # Start container in background
-#   docker-compose -f /home/docker/<your docker-compose.yml> exec <service name> bash # Enter the running container
-#   docker exec -it <container name> bash # Alternative way to enter the running container 
-#   docker-compose -f /home/docker/<your docker-compose.yml> down            # Stop and remove container
-#   docker-compose logs -f <service name>    # View container logs
-#
-# The container runs as a daemon with an interactive shell.
-# You can enter and exit freely without stopping the container.
+#   docker-compose up -d Razel
+#   docker exec -it razel bash
+#   docker-compose down Razel    # Must mention the service name to avoid taking down all containers
+
+# ----- Shared config -----
+x-common: &common
+  image: daal/flame-qwen35:v0
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+  ipc: host
+  ulimits:
+    memlock: -1
+    stack: 67108864
+  network_mode: host
+  environment: &common-env
+    - NGPU=8
+    - CUDA_DEVICE_ORDER=PCI_BUS_ID
+    - NCCL_DEBUG=WARN
+    - HF_HOME=/home/.cache/huggingface  # share HF_HOME to avoid redundent dataset caches
+    - WANDB_API_KEY=${WANDB_API_KEY:-}
+    - WANDB_PROJECT=flame-training
+    - MASTER_ADDR=${MASTER_ADDR:-localhost}
+    - MASTER_PORT=${MASTER_PORT:-29500}
+  volumes:
+    - /home:/home
+  working_dir: /home
+  stdin_open: true
+  tty: true
+  restart: unless-stopped
+  command: /bin/bash
 
 services:
-  gdn-pretrain:  # Customize your Service name
-    image: daal/flame:v0
-    container_name: gdn-pretrain  # Customize your container name
+  # Razel's service and container
+  Razel:
+    <<: *common
+    container_name: razel
+    entrypoint: /home/docker/entrypoint-basic.sh
 
-    # GPU configuration
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
-    # IPC and ulimits (required for distributed training)
-    ipc: host
-    ulimits:
-      memlock: -1
-      stack: 67108864
+  # Sandeep's service and container
+  Sandeep: # service name
+    <<: *common
+    container_name: sandeep # container name
+    entrypoint: /home/docker/entrypoint-basic.sh
 
-    # Network configuration (required for multi-node training)
-    network_mode: host
-
-    # Environment variables
-    environment:
-      - NGPU=8
-      - CUDA_DEVICE_ORDER=PCI_BUS_ID
-      - NCCL_DEBUG=WARN
-      - HF_HOME=/home/a84400789/.cache/huggingface
-      - WANDB_API_KEY=${WANDB_API_KEY:-}
-      - WANDB_PROJECT=flame-training
-      - MASTER_ADDR=${MASTER_ADDR:-localhost}
-      - MASTER_PORT=${MASTER_PORT:-29500}
-
-    # Volume mounts (host home dir mapped into container)
-    volumes:
-      - /home:/home
-
-    # Working directory
-    working_dir: /home
-
-    # Keep container running as a daemon
-    stdin_open: true
-    tty: true
-    # Start an interactive shell by default and install the evaluation harness (flame has been installed in the entrypoint of the image)
-    command: /bin/bash -c "pip install -e /home/a84400789/lm-evaluation-harness && exec bash"
-
-    # Restart policy
-    restart: unless-stopped
+  # Adrian's service and contianer
+  Adrian:
+    <<: *common
+    container_name: adrian
+    entrypoint: /home/docker/entrypoint-flame.sh

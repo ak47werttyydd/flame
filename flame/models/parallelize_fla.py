@@ -237,7 +237,37 @@ class GLATPPlan(TPPlan):
         }
 
 
-TP_PLAN_MAP = {"transformer": TransformerTPPlan, "gla": GLATPPlan}
+class MoETPPlan(TransformerTPPlan):
+    """TP plan for MoE models (e.g., Qwen3.5 MoE).
+
+    Attention layers use TransformerTPPlan. MoE MLP layers skip TP
+    (experts are too small for TP; use FSDP sharding instead).
+    """
+
+    @property
+    def mlp_plan(self):
+        # MoE layers have experts + shared_expert + gate, not a simple MLP.
+        # We skip TP for MoE MLP and rely on FSDP for sharding.
+        # Only return empty plan; FSDP handles the rest.
+        return {}
+
+    @property
+    def layer_plan(self):
+        return {
+            "attn_norm": SequenceParallel(),
+            **self.attn_plan,
+            "mlp_norm": SequenceParallel(),
+            # No MLP TP plan for MoE layers
+        }
+
+
+# model_type -> TP plan class; unknown types fall back to no-TP
+TP_PLAN_MAP = {
+    "transformer": TransformerTPPlan,
+    "gla": GLATPPlan,
+    "qwen3_5_moe": MoETPPlan,
+    "qwen3_5_moe_text": MoETPPlan,
+}
 
 
 def apply_tp(
@@ -252,7 +282,19 @@ def apply_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
-    tp_plan = TP_PLAN_MAP[model.config.model_type](
+    model_type = getattr(model.config, "model_type", None)
+    # For composite configs (e.g. Qwen3.5 VL), check text_config
+    if model_type not in TP_PLAN_MAP:
+        text_config = getattr(model.config, "text_config", None)
+        if text_config is not None:
+            model_type = getattr(text_config, "model_type", model_type)
+    if model_type not in TP_PLAN_MAP:
+        logger.warning(
+            f"No TP plan for model_type={model_type}, skipping tensor parallelism. "
+            f"Supported: {list(TP_PLAN_MAP.keys())}"
+        )
+        return
+    tp_plan = TP_PLAN_MAP[model_type](
         model, loss_parallel=loss_parallel, enable_float8=enable_float8
     )
     parallelize_module(model, tp_mesh, tp_plan.model_plan)
@@ -403,6 +445,41 @@ def apply_compile(model: nn.Module):
     model = torch.compile(model)
 
 
+def _is_moe_block(block: nn.Module) -> bool:
+    """Check if a transformer block contains MoE layers (has experts ModuleList)."""
+    for name, child in block.named_modules():
+        if name.endswith("experts") and isinstance(child, nn.ModuleList) and len(child) > 1:
+            return True
+    return False
+
+
+def _fsdp_wrap_moe_experts(block: nn.Module, fsdp_config: dict, reshard_after_forward: bool):
+    """Wrap individual MoE experts and shared expert with FSDP before wrapping the block.
+
+    This gives FSDP fine-grained control over expert parameter sharding, which is
+    important for memory efficiency with large numbers of experts.
+    """
+    for name, child in block.named_modules():
+        # Wrap each expert individually
+        if name.endswith("experts") and isinstance(child, nn.ModuleList):
+            for expert_idx, expert in enumerate(child):
+                fully_shard(
+                    expert,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                )
+            logger.info(f"  FSDP-wrapped {len(child)} MoE experts in {name}")
+        # Wrap shared expert(s) if present (e.g. shared_expert or shared_experts)
+        if name.endswith(("shared_expert", "shared_experts")):
+            if isinstance(child, nn.Module) and list(child.parameters()):
+                fully_shard(
+                    child,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                )
+                logger.info(f"  FSDP-wrapped shared expert: {name}")
+
+
 def apply_fsdp(
     model: nn.Module,
     dp_mesh: DeviceMesh,
@@ -414,21 +491,7 @@ def apply_fsdp(
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
-
-    Args:
-        model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
-        param_dtype (torch.dtype): The data type to use for model parameters.
-        reduce_dtype (torch.dtype): The data type to use for reduction operations.
-        pp_enabled (bool): Whether pipeline parallelism is enabled.
-        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str, optional):
-            The policy to use for resharding after forward pass. Defaults to "default".
-            Other options: "never", "always".
-            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
-            - "always" will enable `reshard_after_forward` for all forward passes.
-            - "never" will disable `reshard_after_forward` for all forward passes.
-
+    For MoE models, individual experts are wrapped first for fine-grained sharding.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
@@ -440,6 +503,7 @@ def apply_fsdp(
         logger.warning("No block found for FSDP")
     else:
         total_blocks = len(blocks)
+        has_moe = False
         for layer_id, block in enumerate(blocks):
             if reshard_after_forward_policy == "always":
                 reshard_after_forward = True
@@ -447,17 +511,21 @@ def apply_fsdp(
                 reshard_after_forward = False
             elif reshard_after_forward_policy == "default":
                 if pp_enabled:
-                    # For PP, do not reshard after forward to avoid per-microbatch
-                    # all-gathers, which can be expensive and non-overlapped
                     reshard_after_forward = False
                 else:
-                    # As an optimization, do not reshard after forward for the last
-                    # transformer block since FSDP would prefetch it immediately
                     reshard_after_forward = int(layer_id) < total_blocks - 1
             else:
                 raise ValueError(
                     f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
                 )
+
+            # For MoE blocks: wrap experts individually first, then wrap the block
+            if _is_moe_block(block):
+                if not has_moe:
+                    logger.info("Detected MoE architecture, wrapping experts individually with FSDP")
+                    has_moe = True
+                _fsdp_wrap_moe_experts(block, fsdp_config, reshard_after_forward)
+
             fully_shard(
                 block,
                 **fsdp_config,
